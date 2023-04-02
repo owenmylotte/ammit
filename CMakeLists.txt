@@ -33,5 +33,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # define the two sample programs and link to ablate
-add_executable(ablateLibraryClient ablateLibraryClient.cpp)
+add_executable(ablateLibraryClient postProcess.cpp)
 target_link_libraries(ablateLibraryClient PUBLIC ablateLibrary)

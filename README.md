@@ -16,9 +16,9 @@ export PKG_CONFIG_PATH="${PETSC_DIR}/${PETSC_ARCH}/lib/pkgconfig:$PKG_CONFIG_PAT
 If developing features for ABLATE you may want to specify a local build of ABLATE instead of downloading it. This can be
 done with the CMAKE option ABLATE_PATH. For example if configuring on the command line:
 
-    ```bash
-    cmake -DABLATE_PATH=/path/to/ablate/source/dir  -S ../ablateClientTemplate -B .
-    ```
+```bash
+cmake -DABLATE_PATH=/home/owen/CLionProjects/ablate  -S ../ammit -B .
+```
 
 or if using CLion [specify the option](https://www.jetbrains.com/help/clion/cmake-profile.html) as shown.
 ![clion option specification](assets/clion_option_specification.png)
