@@ -8,7 +8,7 @@ the [ABLATE Build Wiki](https://github.com/UBCHREST/ablate/wiki) along with sett
 variables:
 
 ```bash
-export PETSC_DIR="" #UPDATE to the real path of petsc
+export PETSC_DIR="/home/owen/petsc" #UPDATE to the real path of petsc
 export PETSC_ARCH="arch-ablate-debug" # arch-ablate-debug or arch-ablate-opt
 export PKG_CONFIG_PATH="${PETSC_DIR}/${PETSC_ARCH}/lib/pkgconfig:$PKG_CONFIG_PATH"
 ```
@@ -17,7 +17,7 @@ If developing features for ABLATE you may want to specify a local build of ABLAT
 done with the CMAKE option ABLATE_PATH. For example if configuring on the command line:
 
 ```bash
-cmake -DABLATE_PATH=/home/owen/CLionProjects/ablate  -S ../ammit -B .
+cmake -D ABLATE_PATH=/home/owen/CLionProjects/ablate  -S ../ammit -B .
 ```
 
 or if using CLion [specify the option](https://www.jetbrains.com/help/clion/cmake-profile.html) as shown.

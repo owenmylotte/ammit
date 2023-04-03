@@ -1,7 +1,14 @@
 #include <petsc.h>
+#include <environment/download.hpp>
 #include <environment/runEnvironment.hpp>
+#include <fstream>
+#include <io/hdf5MultiFileSerializer.hpp>
+#include <localPath.hpp>
 #include <mathFunctions/functionFactory.hpp>
 #include <memory>
+#include <parameters/petscPrefixOptions.hpp>
+#include <utilities/mpiUtilities.hpp>
+#include <yamlParser.hpp>
 #include "builder.hpp"
 #include "domain/boxMesh.hpp"
 #include "domain/modifiers/distributeWithGhostCells.hpp"
@@ -28,114 +35,125 @@ typedef struct {
     PetscReal pR;
 } InitialConditions;
 
-static PetscErrorCode SetInitialCondition(PetscInt dim, PetscReal time, const PetscReal x[], PetscInt Nf, PetscScalar *u, void *ctx) {
-    InitialConditions *initialConditions = (InitialConditions *)ctx;
+const char* replacementInputPrefix = "-yaml::";
 
-    if (x[0] < initialConditions->length / 2.0) {
-        u[ablate::finiteVolume::CompressibleFlowFields::RHO] = initialConditions->rhoL;
-        u[ablate::finiteVolume::CompressibleFlowFields::RHOU + 0] = initialConditions->rhoL * initialConditions->uL;
-
-        PetscReal e = initialConditions->pL / ((initialConditions->gamma - 1.0) * initialConditions->rhoL);
-        PetscReal et = e + 0.5 * PetscSqr(initialConditions->uL);
-        u[ablate::finiteVolume::CompressibleFlowFields::RHOE] = et * initialConditions->rhoL;
-
-    } else {
-        u[ablate::finiteVolume::CompressibleFlowFields::RHO] = initialConditions->rhoR;
-        u[ablate::finiteVolume::CompressibleFlowFields::RHOU + 0] = initialConditions->rhoR * initialConditions->uR;
-
-        PetscReal e = initialConditions->pR / ((initialConditions->gamma - 1.0) * initialConditions->rhoR);
-        PetscReal et = e + 0.5 * PetscSqr(initialConditions->uR);
-        u[ablate::finiteVolume::CompressibleFlowFields::RHOE] = et * initialConditions->rhoR;
-    }
-
-    return 0;
-}
-
-static PetscErrorCode PhysicsBoundary_Euler(PetscReal time, const PetscReal *c, const PetscReal *n, const PetscScalar *a_xI, PetscScalar *a_xG, void *ctx) {
-    InitialConditions *initialConditions = (InitialConditions *)ctx;
-
-    if (c[0] < initialConditions->length / 2.0) {
-        a_xG[ablate::finiteVolume::CompressibleFlowFields::RHO] = initialConditions->rhoL;
-
-        a_xG[ablate::finiteVolume::CompressibleFlowFields::RHOU + 0] = initialConditions->rhoL * initialConditions->uL;
-
-        PetscReal e = initialConditions->pL / ((initialConditions->gamma - 1.0) * initialConditions->rhoL);
-        PetscReal et = e + 0.5 * PetscSqr(initialConditions->uL);
-        a_xG[ablate::finiteVolume::CompressibleFlowFields::RHOE] = et * initialConditions->rhoL;
-    } else {
-        a_xG[ablate::finiteVolume::CompressibleFlowFields::RHO] = initialConditions->rhoR;
-
-        a_xG[ablate::finiteVolume::CompressibleFlowFields::RHOU + 0] = initialConditions->rhoR * initialConditions->uR;
-
-        PetscReal e = initialConditions->pR / ((initialConditions->gamma - 1.0) * initialConditions->rhoR);
-        PetscReal et = e + 0.5 * PetscSqr(initialConditions->uR);
-        a_xG[ablate::finiteVolume::CompressibleFlowFields::RHOE] = et * initialConditions->rhoR;
-    }
-    return 0;
-    PetscFunctionReturn(0);
-}
-
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     // initialize petsc and mpi
     ablate::environment::RunEnvironment::Initialize(&argc, &argv);
     ablate::utilities::PetscUtilities::Initialize();
 
     {
-        // define some initial conditions
-        InitialConditions initialConditions{.gamma = 1.4, .length = 1.0, .rhoL = 1.0, .uL = 0.0, .pL = 1.0, .rhoR = 0.125, .uR = 0.0, .pR = .1};
+        // check to see if we should print options
+        char filename[PETSC_MAX_PATH_LEN] = "";
+        PetscBool fileSpecified = PETSC_FALSE;
+        PetscOptionsGetString(nullptr, nullptr, "--input", filename, PETSC_MAX_PATH_LEN, &fileSpecified) >> ablate::utilities::PetscUtilities::checkError;
+        if (!fileSpecified) {
+            throw std::invalid_argument("the --input must be specified");
+        }
 
-        // setup the run environment
-        ablate::parameters::MapParameters runEnvironmentParameters(std::map<std::string, std::string>{{"title", "clientExample"}});
-        ablate::environment::RunEnvironment::Setup(runEnvironmentParameters);
+        // locate or download the file
+        std::filesystem::path filePath;
+        if (ablate::environment::Download::IsUrl(filename)) {
+            ablate::environment::Download downloader(filename);
+            filePath = downloader.Locate();
+        } else {
+            cppParser::LocalPath locator(filename);
+            filePath = locator.Locate();
+        }
 
-        auto eos = std::make_shared<ablate::eos::PerfectGas>(std::make_shared<ablate::parameters::MapParameters>(std::map<std::string, std::string>{{"gamma", "1.4"}}));
+        if (!std::filesystem::exists(filePath)) {
+            throw std::invalid_argument("unable to locate input file: " + filePath.string());
+        }
+        {
+            // build options from the command line
+            auto yamlOptions = std::make_shared<ablate::parameters::PetscPrefixOptions>(replacementInputPrefix);
 
-        // determine required fields for finite volume compressible flow
-        std::vector<std::shared_ptr<ablate::domain::FieldDescriptor>> fieldDescriptors = {std::make_shared<ablate::finiteVolume::CompressibleFlowFields>(eos)};
+            // create the yaml parser
+            std::shared_ptr<cppParser::Factory> parser = std::make_shared<cppParser::YamlParser>(filePath, yamlOptions->GetMap());
 
-        auto domain =
-            std::make_shared<ablate::domain::BoxMesh>("simpleMesh",
-                                                      fieldDescriptors,
-                                                      std::vector<std::shared_ptr<ablate::domain::modifiers::Modifier>>{std::make_shared<ablate::domain::modifiers::DistributeWithGhostCells>(),
-                                                                                                                        std::make_shared<ablate::domain::modifiers::GhostBoundaryCells>()},
-                                                      std::vector<int>{100},
-                                                      std::vector<double>{0.0},
-                                                      std::vector<double>{initialConditions.length},
-                                                      std::vector<std::string>{"NONE"} /*boundary*/,
-                                                      false /*simplex*/,
-                                                      ablate::parameters::MapParameters::Create({{"dm_refine", "2"}, {"dm_distribute", ""}}));
+            // setup the monitor
+            auto setupEnvironmentParameters = parser->GetByName<ablate::parameters::Parameters>("environment");
+            ablate::environment::RunEnvironment::Setup(*setupEnvironmentParameters, filePath);
 
-        // Set up the flow data
-        auto parameters = std::make_shared<ablate::parameters::MapParameters>(std::map<std::string, std::string>{{"cfl", ".4"}});
+            // Copy over the input file
+            int rank;
+            MPI_Comm_rank(PETSC_COMM_WORLD, &rank) >> ablate::utilities::MpiUtilities::checkError;
+            if (rank == 0) {
+                std::filesystem::path inputCopy = ablate::environment::RunEnvironment::Get().GetOutputDirectory() / filePath.filename();
+                std::ofstream stream(inputCopy);
+                stream.close();
+            }
 
-        // Set the initial conditions for euler
-        auto initialCondition = std::make_shared<ablate::mathFunctions::FieldFunction>("euler", ablate::mathFunctions::Create(SetInitialCondition, (void *)&initialConditions));
+            // run with the parser
+            // get the global arguments
+            auto globalArguments = parser->GetByName<ablate::parameters::Parameters>("arguments");
+            if (globalArguments) {
+                globalArguments->Fill(nullptr);
+            }
 
-        // create a time stepper
-        auto timeStepper = ablate::solver::TimeStepper(
-            domain, ablate::parameters::MapParameters::Create({{"ts_adapt_type", "physicsConstrained"}, {"ts_max_steps", "600"}, {"ts_dt", "0.00000625"}}), {}, {initialCondition});
+            // create a time stepper
+            auto timeStepper = parser->Get(cppParser::ArgumentIdentifier<ablate::solver::TimeStepper>{.inputName = "timestepper"});
 
-        auto boundaryConditions = std::vector<std::shared_ptr<ablate::finiteVolume::boundaryConditions::BoundaryCondition>>{
-            std::make_shared<ablate::finiteVolume::boundaryConditions::Ghost>("euler", "wall left", 1, PhysicsBoundary_Euler, (void *)&initialConditions),
-            std::make_shared<ablate::finiteVolume::boundaryConditions::Ghost>("euler", "wall right", 2, PhysicsBoundary_Euler, (void *)&initialConditions)};
+            // Check to see if a single or multiple solvers were specified
+            if (parser->Contains("solver")) {
+                auto solver = parser->GetByName<ablate::solver::Solver>("solver");
+                auto solverMonitors = parser->GetFactory("solver")->GetByName<std::vector<ablate::monitors::Monitor>>("monitors", std::vector<std::shared_ptr<ablate::monitors::Monitor>>());
+                timeStepper->Register(solver, solverMonitors);
+            }
 
-        // Create a shockTube solver
-        auto shockTubeSolver = std::make_shared<ablate::finiteVolume::CompressibleFlowSolver>("compressibleShockTube",
-                                                                                              ablate::domain::Region::ENTIREDOMAIN,
-                                                                                              nullptr /*options*/,
-                                                                                              eos,
-                                                                                              parameters,
-                                                                                              nullptr /*transportModel*/,
-                                                                                              std::make_shared<ablate::finiteVolume::fluxCalculator::Ausm>(),
-                                                                                              boundaryConditions /*boundary conditions*/);
+            // Add in other solvers
+            auto solverList = parser->GetByName<std::vector<ablate::solver::Solver>>("solvers", std::vector<std::shared_ptr<ablate::solver::Solver>>());
+            std::vector<std::shared_ptr<ablate::monitors::Monitor>> monitorList;
+            if (!solverList.empty()) {
+                auto solverFactorySequence = parser->GetFactorySequence("solvers");
 
-        // register the flowSolver with the timeStepper
-        timeStepper.Register(
-            shockTubeSolver,
-            {std::make_shared<ablate::monitors::TimeStepMonitor>(), std::make_shared<ablate::monitors::CurveMonitor>(std::make_shared<ablate::io::interval::FixedInterval>(10), "outputCurve")});
+                // initialize the flow for each
+                for (std::size_t i = 0; i < solverFactorySequence.size(); i++) {
+                    auto& solver = solverList[i];
+                    auto solverMonitors = solverFactorySequence[i]->GetByName<std::vector<ablate::monitors::Monitor>>("monitors", std::vector<std::shared_ptr<ablate::monitors::Monitor>>());
+                    timeStepper->Register(solver, solverMonitors);
+                    monitorList = solverMonitors;
+                }
+            }
 
-        // Solve the time stepper
-        timeStepper.Solve();
+            timeStepper->Initialize();  //! Registers all of the monitors and initializes them within the newly created domain.
+
+            /**
+             * Loop through the time steps that are saved in the input file directory.
+             * Set up the domain with the value of each time step and call the monitor save functions.
+             */
+            for (int i = 0; i < 1; i++) {
+                /**
+                 * Make a serializer that is dedicated to saving only.
+                 */
+                // Register the solver with the serializer
+                ablate::io::Hdf5MultiFileSerializer postSerializer(i, nullptr);  // Create the same type of serializer that is in the input file
+                for (auto& monitor : monitorList) {
+                    auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
+                    if (serializable && serializable->Serialize()) {
+                        postSerializer.Register(serializable);  //! Register all of the monitors with the serializer so that they can be written out through it.
+                    }
+                }
+
+                // TODO: Use the restart code to get the time step that is wanted now.
+
+                for (auto& monitor : monitorList) {
+                    /**
+                     * Loop through each monitor and call the serializer on it.
+                     */
+                    monitor->CallMonitor(timeStepper->GetTS(), i, 0, nullptr); //! This saves the information to the HDF5 file.
+                }
+            }
+
+            // check for unused parameters
+            auto unusedValues = parser->GetUnusedValues();
+            if (!unusedValues.empty()) {
+                std::cout << "WARNING: The following input parameters were not used:" << std::endl;
+                for (auto unusedValue : unusedValues) {
+                    std::cout << unusedValue << std::endl;
+                }
+            }
+        }
     }
 
     ablate::environment::RunEnvironment::Finalize();
