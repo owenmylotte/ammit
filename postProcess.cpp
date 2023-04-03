@@ -1,26 +1,15 @@
 #include <petsc.h>
-#include <environment/download.hpp>
 #include <environment/runEnvironment.hpp>
 #include <fstream>
 #include <io/hdf5MultiFileSerializer.hpp>
 #include <localPath.hpp>
-#include <mathFunctions/functionFactory.hpp>
 #include <memory>
 #include <parameters/petscPrefixOptions.hpp>
 #include <utilities/mpiUtilities.hpp>
 #include <yamlParser.hpp>
 #include "builder.hpp"
-#include "domain/boxMesh.hpp"
-#include "domain/modifiers/distributeWithGhostCells.hpp"
-#include "domain/modifiers/ghostBoundaryCells.hpp"
-#include "eos/perfectGas.hpp"
-#include "finiteVolume/boundaryConditions/ghost.hpp"
-#include "finiteVolume/compressibleFlowFields.hpp"
 #include "finiteVolume/compressibleFlowSolver.hpp"
-#include "finiteVolume/fluxCalculator/ausm.hpp"
-#include "io/interval/fixedInterval.hpp"
 #include "monitors/curveMonitor.hpp"
-#include "monitors/timeStepMonitor.hpp"
 #include "parameters/mapParameters.hpp"
 #include "utilities/petscUtilities.hpp"
 
@@ -44,48 +33,49 @@ int main(int argc, char** argv) {
 
     {
         // check to see if we should print options
-        char filename[PETSC_MAX_PATH_LEN] = "";
+        char directoryName[PETSC_MAX_PATH_LEN] = "";
         PetscBool fileSpecified = PETSC_FALSE;
-        PetscOptionsGetString(nullptr, nullptr, "--input", filename, PETSC_MAX_PATH_LEN, &fileSpecified) >> ablate::utilities::PetscUtilities::checkError;
+        PetscOptionsGetString(nullptr, nullptr, "--directory", directoryName, PETSC_MAX_PATH_LEN, &fileSpecified) >> ablate::utilities::PetscUtilities::checkError;
         if (!fileSpecified) {
-            throw std::invalid_argument("the --input must be specified");
+            throw std::invalid_argument("the --directory must be specified");  //! Take a directory instead of an input file. Use whatever yaml file in the directory.
+        }
+        // Get the path of the simulation to post process.
+        std::filesystem::path directoryPath;
+        cppParser::LocalPath locator(directoryName);
+        directoryPath = locator.Locate();
+
+        // Iterate through the files in the directory and look for a yaml file to use as the input file.
+        std::filesystem::path inputFilePath;
+        std::filesystem::path restartFilePath;
+        for (auto const& dir_entry : std::filesystem::directory_iterator{directoryPath}) {
+            if (dir_entry.path().extension().string() == ".yaml") inputFilePath = dir_entry.path();   // If it's a yaml file, then make this the input file path.
+            if (dir_entry.path().extension().string() == ".rst") restartFilePath = dir_entry.path();  // If it's a restart file, then make this the restart file path.
         }
 
-        // locate or download the file
-        std::filesystem::path filePath;
-        if (ablate::environment::Download::IsUrl(filename)) {
-            ablate::environment::Download downloader(filename);
-            filePath = downloader.Locate();
-        } else {
-            cppParser::LocalPath locator(filename);
-            filePath = locator.Locate();
+        if (!std::filesystem::exists(inputFilePath)) {
+            throw std::invalid_argument("unable to locate input file: " + inputFilePath.string());
         }
-
-        if (!std::filesystem::exists(filePath)) {
-            throw std::invalid_argument("unable to locate input file: " + filePath.string());
-        }
-
-        // Get the restart file from the working directory so that the max sequence number is known
-        auto restartFilePath = ablate::environment::RunEnvironment::Get().GetOutputDirectory() / "restart.rst";
-        auto yaml = YAML::LoadFile(restartFilePath);
-        PetscInt maxSequenceNumber = yaml["sequenceNumber"].as<PetscInt>(); //! Store the sequence number of the input file
 
         {
             // build options from the command line
             auto yamlOptions = std::make_shared<ablate::parameters::PetscPrefixOptions>(replacementInputPrefix);
 
             // create the yaml parser
-            std::shared_ptr<cppParser::Factory> parser = std::make_shared<cppParser::YamlParser>(filePath, yamlOptions->GetMap());
+            std::shared_ptr<cppParser::Factory> parser = std::make_shared<cppParser::YamlParser>(inputFilePath, yamlOptions->GetMap());
 
             // setup the monitor
-            auto setupEnvironmentParameters = parser->GetByName<ablate::parameters::Parameters>("environment");
-            ablate::environment::RunEnvironment::Setup(*setupEnvironmentParameters, filePath);
+            //            auto setupEnvironmentParameters = parser->GetByName<ablate::parameters::Parameters>("environment");
+            //            ablate::environment::RunEnvironment::Setup(*setupEnvironmentParameters, inputFilePath);
+
+            // Get the restart file from the working directory so that the max sequence number is known
+            auto yaml = YAML::LoadFile(restartFilePath);                         //! Use whatever restart file in the input directory.
+            PetscInt maxSequenceNumber = yaml["sequenceNumber"].as<PetscInt>();  //! Store the sequence number of the input file
 
             // Copy over the input file
             int rank;
             MPI_Comm_rank(PETSC_COMM_WORLD, &rank) >> ablate::utilities::MpiUtilities::checkError;
             if (rank == 0) {
-                std::filesystem::path inputCopy = ablate::environment::RunEnvironment::Get().GetOutputDirectory() / filePath.filename();
+                std::filesystem::path inputCopy = ablate::environment::RunEnvironment::Get().GetOutputDirectory() / inputFilePath.filename();
                 std::ofstream stream(inputCopy);
                 stream.close();
             }
@@ -140,9 +130,9 @@ int main(int argc, char** argv) {
             for (int i = 0; i < maxSequenceNumber; i++) {
                 for (auto& monitor : monitorList) {
                     auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
-                    postSerializer->RestoreFromSequence(i, serializable); //! Use the restart code to get the time step that is wanted now.
-                     //! Loop through each monitor and call the serializer on it.
-                    monitor->CallMonitor(timeStepper->GetTS(), i, 0, nullptr); //! This saves the information to the HDF5 file.
+                    postSerializer->RestoreFromSequence(i, serializable);       //! Use the restart code to get the time step that is wanted now.
+                                                                                //! Loop through each monitor and call the serializer on it.
+                    monitor->CallMonitor(timeStepper->GetTS(), i, 0, nullptr);  //! This saves the information to the HDF5 file.
                 }
             }
 
