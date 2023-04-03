@@ -115,11 +115,11 @@ int main(int argc, char** argv) {
             timeStepper->Initialize();  //! Registers all of the monitors and initializes them within the newly created domain.
 
             // Register the solver with the serializer
-            auto postSerializer = parser->GetByName<ablate::io::Hdf5MultiFileSerializer>("io");
+            auto postSerializer = ablate::io::Hdf5MultiFileSerializer(0, nullptr);
             for (auto& monitor : monitorList) {
                 auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
                 if (serializable && serializable->Serialize()) {
-                    postSerializer->Register(serializable);  //! Register all of the monitors with the serializer so that they can be written out through it.
+                    postSerializer.Register(serializable);  //! Register all of the monitors with the serializer so that they can be written out through it.
                 }
             }
 
@@ -130,9 +130,10 @@ int main(int argc, char** argv) {
             for (int i = 0; i < maxSequenceNumber; i++) {
                 for (auto& monitor : monitorList) {
                     auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
-                    postSerializer->RestoreFromSequence(i, serializable);       //! Use the restart code to get the time step that is wanted now.
+                    postSerializer.RestoreFromSequence(i, serializable);       //! Use the restart code to get the time step that is wanted now.
                                                                                 //! Loop through each monitor and call the serializer on it.
-                    monitor->CallMonitor(timeStepper->GetTS(), i, 0, nullptr);  //! This saves the information to the HDF5 file.
+                    monitor->CallMonitor(timeStepper->GetTS(), i, 0, timeStepper->GetSolutionVector());  //! This saves the information to the HDF5 file.
+                    postSerializer.GetSerializeFunction();
                 }
             }
 
