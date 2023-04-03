@@ -64,6 +64,12 @@ int main(int argc, char** argv) {
         if (!std::filesystem::exists(filePath)) {
             throw std::invalid_argument("unable to locate input file: " + filePath.string());
         }
+
+        // Get the restart file from the working directory so that the max sequence number is known
+        auto restartFilePath = ablate::environment::RunEnvironment::Get().GetOutputDirectory() / "restart.rst";
+        auto yaml = YAML::LoadFile(restartFilePath);
+        PetscInt maxSequenceNumber = yaml["sequenceNumber"].as<PetscInt>(); //! Store the sequence number of the input file
+
         {
             // build options from the command line
             auto yamlOptions = std::make_shared<ablate::parameters::PetscPrefixOptions>(replacementInputPrefix);
@@ -118,29 +124,24 @@ int main(int argc, char** argv) {
 
             timeStepper->Initialize();  //! Registers all of the monitors and initializes them within the newly created domain.
 
+            // Register the solver with the serializer
+            auto postSerializer = parser->GetByName<ablate::io::Hdf5MultiFileSerializer>("io");
+            for (auto& monitor : monitorList) {
+                auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
+                if (serializable && serializable->Serialize()) {
+                    postSerializer->Register(serializable);  //! Register all of the monitors with the serializer so that they can be written out through it.
+                }
+            }
+
             /**
              * Loop through the time steps that are saved in the input file directory.
              * Set up the domain with the value of each time step and call the monitor save functions.
              */
-            for (int i = 0; i < 1; i++) {
-                /**
-                 * Make a serializer that is dedicated to saving only.
-                 */
-                // Register the solver with the serializer
-                ablate::io::Hdf5MultiFileSerializer postSerializer(i, nullptr);  // Create the same type of serializer that is in the input file
+            for (int i = 0; i < maxSequenceNumber; i++) {
                 for (auto& monitor : monitorList) {
                     auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
-                    if (serializable && serializable->Serialize()) {
-                        postSerializer.Register(serializable);  //! Register all of the monitors with the serializer so that they can be written out through it.
-                    }
-                }
-
-                // TODO: Use the restart code to get the time step that is wanted now.
-
-                for (auto& monitor : monitorList) {
-                    /**
-                     * Loop through each monitor and call the serializer on it.
-                     */
+                    postSerializer->RestoreFromSequence(i, serializable); //! Use the restart code to get the time step that is wanted now.
+                     //! Loop through each monitor and call the serializer on it.
                     monitor->CallMonitor(timeStepper->GetTS(), i, 0, nullptr); //! This saves the information to the HDF5 file.
                 }
             }
