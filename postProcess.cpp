@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
                     postSerializer.RestoreFromSequence(i, serializable);       //! Use the restart code to get the time step that is wanted now.
                                                                                 //! Loop through each monitor and call the serializer on it.
                     monitor->CallMonitor(timeStepper->GetTS(), i, 0, timeStepper->GetSolutionVector());  //! This saves the information to the HDF5 file.
-                    postSerializer.GetSerializeFunction();
+                    postSerializer.CallSave(timeStepper->GetTS(), i, 0, timeStepper->GetSolutionVector());
                 }
             }
 
