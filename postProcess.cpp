@@ -2,6 +2,7 @@
 #include <environment/runEnvironment.hpp>
 #include <fstream>
 #include <io/hdf5MultiFileSerializer.hpp>
+#include <io/interval/fixedInterval.hpp>
 #include <localPath.hpp>
 #include <memory>
 #include <parameters/petscPrefixOptions.hpp>
@@ -12,6 +13,7 @@
 #include "monitors/curveMonitor.hpp"
 #include "parameters/mapParameters.hpp"
 #include "utilities/petscUtilities.hpp"
+#include <petscviewerhdf5.h>
 
 typedef struct {
     PetscReal gamma;
@@ -115,7 +117,8 @@ int main(int argc, char** argv) {
             timeStepper->Initialize();  //! Registers all of the monitors and initializes them within the newly created domain.
 
             // Register the solver with the serializer
-            auto postSerializer = ablate::io::Hdf5MultiFileSerializer(0, nullptr);
+            auto interval = std::shared_ptr<ablate::io::interval::FixedInterval>(0);  //! Create an interval
+            auto postSerializer = ablate::io::Hdf5MultiFileSerializer(interval, nullptr);
             for (auto& monitor : monitorList) {
                 auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
                 if (serializable && serializable->Serialize()) {
@@ -127,13 +130,32 @@ int main(int argc, char** argv) {
              * Loop through the time steps that are saved in the input file directory.
              * Set up the domain with the value of each time step and call the monitor save functions.
              */
-            for (int i = 0; i < maxSequenceNumber; i++) {
+            for (int i = 0; i <= maxSequenceNumber; i++) {
                 for (auto& monitor : monitorList) {
                     auto serializable = std::dynamic_pointer_cast<ablate::io::Serializable>(monitor);
-                    postSerializer.RestoreFromSequence(i, serializable);       //! Use the restart code to get the time step that is wanted now.
-                                                                                //! Loop through each monitor and call the serializer on it.
+                    postSerializer.RestoreFromSequence(i, serializable);                                 //! Use the restart code to get the time step that is wanted now.
+                                                                                                         //! Loop through each monitor and call the serializer on it.
                     monitor->CallMonitor(timeStepper->GetTS(), i, 0, timeStepper->GetSolutionVector());  //! This saves the information to the HDF5 file.
-                    postSerializer.CallSave(timeStepper->GetTS(), i, 0, timeStepper->GetSolutionVector());
+
+                        // Create an output path
+                        std::stringstream sequenceNumberOutputStream;
+                        sequenceNumberOutputStream << std::setw(5) << std::setfill('0') << i;
+                        auto sequenceNumberOutputString = "." + sequenceNumberOutputStream.str();
+                        auto filePath = directoryPath / serializable->GetId() / (serializable->GetId() + sequenceNumberOutputString + ".hdf5");
+
+                        PetscViewer petscViewer = nullptr;
+                        PetscViewerHDF5Open(PETSC_COMM_WORLD, filePath.string().c_str(), FILE_MODE_WRITE, &petscViewer) >> ablate::utilities::PetscUtilities::checkError;
+
+                        // set the petsc options if provided
+                        PetscObjectSetOptions((PetscObject)petscViewer, nullptr) >> ablate::utilities::PetscUtilities::checkError;
+                        PetscViewerSetFromOptions(petscViewer) >> ablate::utilities::PetscUtilities::checkError;
+                        PetscViewerViewFromOptions(petscViewer, nullptr, "-hdf5ViewerView") >> ablate::utilities::PetscUtilities::checkError;
+
+                        // NOTE: as far as the output file the sequence number is always zero because it is a new file
+                        serializable->Save(petscViewer, 0, 0);
+
+                        PetscViewerDestroy(&petscViewer) >> ablate::utilities::PetscUtilities::checkError;
+
                 }
             }
 
